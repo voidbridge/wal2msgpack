@@ -1,6 +1,6 @@
 MODULES = wal2msgpack
 EXTENSION = wal2msgpack
-DOCS = README.isbn_issn
+DOCS = README.md
 
 PG_CONFIG = pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)
