@@ -77,8 +77,6 @@ static const int insert_event = 2;
 static const int update_event = 3;
 static const int delete_event = 4;
 
-static const int INITIAL_USER_COLUMNS = 20;
-
 void _PG_init(void)
 {
     /* other plugins can perform things here */
