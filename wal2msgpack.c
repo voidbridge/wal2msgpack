@@ -73,9 +73,9 @@ static void write_event(LogicalDecodingContext *ctx, MsgPackDecodingData *data);
 
 static const int begin_transaction_event = 0;
 static const int commit_transaction_event = 1;
-static const int insert_event = 2;
-static const int update_event = 3;
-static const int delete_event = 4;
+static const int insert_event = 5;
+static const int update_event = 6;
+static const int delete_event = 7;
 
 void _PG_init(void)
 {
@@ -230,19 +230,10 @@ pg_decode_shutdown(LogicalDecodingContext *ctx)
 /* BEGIN callback */
 static void
 pg_decode_begin_txn(LogicalDecodingContext *ctx, ReorderBufferTXN *txn) {
-    int64 commit;
     MsgPackDecodingData *data = ctx->output_plugin_private;
 
     data->nentries = txn->nentries;
     data->first_entry = true;
-
-    msgpack_sbuffer_clear(data->sbuf);
-
-    msgpack_pack_int8(data->pk, begin_transaction_event);
-    commit = TIMESTAMPTZ_TO_USEC_SINCE_EPOCH(txn->commit_time);
-    msgpack_pack_int64(data->pk, commit);
-
-    write_event(ctx, data);
 }
 
 static void
@@ -257,11 +248,6 @@ pg_decode_commit_txn(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
         elog(DEBUG1, "txn has catalog changes: no");
     elog(DEBUG1, "my change counter: %lu ; # of changes: %lu ; # of changes in memory: %lu", data->nentries, txn->nentries, txn->nentries_mem);
     elog(DEBUG1, "# of subxacts: %d", txn->nsubtxns);
-
-    msgpack_sbuffer_clear(data->sbuf);
-    msgpack_pack_int8(data->pk, commit_transaction_event);
-
-    write_event(ctx, data);
 }
 
 static void write_event(LogicalDecodingContext *ctx, MsgPackDecodingData *data)
@@ -631,6 +617,7 @@ pg_decode_change(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
         TupleDesc	tupdesc;
         size_t relNamespaceLength;
         size_t relNameLength;
+        int64 commit;
 
         tupdesc = RelationGetDescr(relation);
 
@@ -721,6 +708,9 @@ pg_decode_change(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
             default:
                 Assert(false);
         }
+
+        commit = TIMESTAMPTZ_TO_USEC_SINCE_EPOCH(txn->commit_time);
+        msgpack_pack_int64(data->pk, commit);
 
         relNamespaceLength = strlen(relNamespace);
         msgpack_pack_str(data->pk, relNamespaceLength);
