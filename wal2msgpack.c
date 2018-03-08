@@ -71,8 +71,6 @@ static void pg_decode_message(LogicalDecodingContext *ctx,
 
 static void write_event(LogicalDecodingContext *ctx, MsgPackDecodingData *data);
 
-static const int begin_transaction_event = 0;
-static const int commit_transaction_event = 1;
 static const int insert_event = 5;
 static const int update_event = 6;
 static const int delete_event = 7;
