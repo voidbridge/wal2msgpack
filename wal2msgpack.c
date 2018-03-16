@@ -1,8 +1,7 @@
 #include "postgres.h"
 #include <replication/reorderbuffer.h>
 #include <catalog/pg_class.h>
-#include <sys/time.h>
-
+#include <utils/rel.h>
 #include "catalog/pg_type.h"
 
 #include "replication/logical.h"
@@ -46,13 +45,16 @@ typedef struct
 
     regex_t       tables[8];
 
+    int64 commit;
+
     msgpack_sbuffer* sbuf;
     msgpack_packer* pk;
 } MsgPackDecodingData;
 
 
+
 /* These must be available to pg_dlsym() */
-static void pg_decode_startup(LogicalDecodingContext *ctx, OutputPluginOptions *opt, bool is_init);
+static void pg_decode_startup(LogicalDecodingContext *ctx, OutputPluginOptions *opt, char is_init);
 static void pg_decode_shutdown(LogicalDecodingContext *ctx);
 static void pg_decode_begin_txn(LogicalDecodingContext *ctx,
                                 ReorderBufferTXN *txn);
@@ -60,14 +62,7 @@ static void pg_decode_commit_txn(LogicalDecodingContext *ctx,
                                  ReorderBufferTXN *txn, XLogRecPtr commit_lsn);
 static void pg_decode_change(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
                              Relation relation, ReorderBufferChange *change);
-//static bool pg_decode_filter(LogicalDecodingContext *ctx, RepOriginId origin_id);
 
-#if	PG_VERSION_NUM >= 90600
-static void pg_decode_message(LogicalDecodingContext *ctx,
-                              ReorderBufferTXN *txn, XLogRecPtr lsn,
-                              bool transactional, const char *prefix,
-                              Size content_size, const char *content);
-#endif
 
 static void write_event(LogicalDecodingContext *ctx, MsgPackDecodingData *data);
 
@@ -88,35 +83,25 @@ void _PG_output_plugin_init(OutputPluginCallbacks *cb)
     cb->begin_cb = pg_decode_begin_txn;
     cb->change_cb = pg_decode_change;
     cb->commit_cb = pg_decode_commit_txn;
- //   cb->filter_by_origin_cb = pg_decode_filter;
     cb->shutdown_cb = pg_decode_shutdown;
-#if	PG_VERSION_NUM >= 90600
- //   cb->message_cb = pg_decode_message;
-#endif
+    elog(DEBUG1, "initialize wal2msgpack");
 }
 
 /* Initialize this plugin */
 static void
-pg_decode_startup(LogicalDecodingContext *ctx, OutputPluginOptions *opt, bool is_init)
+pg_decode_startup(LogicalDecodingContext *ctx, OutputPluginOptions *opt, char is_init)
 {
     ListCell	*option;
     MsgPackDecodingData *data;
 
     data = palloc0(sizeof(MsgPackDecodingData));
-#if PG_VERSION_NUM >= 90600
-/*    data->context = AllocSetContextCreate(TopMemoryContext,
-                                          "wal2msgpack output context",
-                                          ALLOCSET_DEFAULT_SIZES
-    );*/
-#else
+
     data->context = AllocSetContextCreate(TopMemoryContext,
                                           "wal2msgpack output context",
-                                        ALLOCSET_DEFAULT_MINSIZE,
-										ALLOCSET_DEFAULT_INITSIZE,
-										ALLOCSET_DEFAULT_MAXSIZE
+                                          ALLOCSET_DEFAULT_SIZES
     );
-#endif
 
+    elog(DEBUG1, "pg_decode_startup wal2msgpack");
     data->nentries = 0;
     data->first_entry = true;
     data->include = 0;
@@ -210,6 +195,7 @@ pg_decode_startup(LogicalDecodingContext *ctx, OutputPluginOptions *opt, bool is
                                    elem->arg ? strVal(elem->arg) : "(null)")));
         }
     }
+    elog(DEBUG1, "completed pg_decode_startup wal2msgpack");
 }
 
 
@@ -229,9 +215,11 @@ pg_decode_shutdown(LogicalDecodingContext *ctx)
 static void
 pg_decode_begin_txn(LogicalDecodingContext *ctx, ReorderBufferTXN *txn) {
     MsgPackDecodingData *data = ctx->output_plugin_private;
+    elog(DEBUG1, "pg_decode_begin_txn wal2msgpack");
 
     data->nentries = txn->nentries;
     data->first_entry = true;
+    data->commit = TIMESTAMPTZ_TO_USEC_SINCE_EPOCH(txn->commit_time);
 }
 
 static void
@@ -257,7 +245,7 @@ static void write_event(LogicalDecodingContext *ctx, MsgPackDecodingData *data)
 
 
 static void increment_actual_attrs(int* actual_attrs, MsgPackDecodingData	*data, Oid typid,
-                                   Oid typoutput, char* name, Datum datum, bool isnull)
+                                   Oid typoutput, char* name, Datum datum, char isnull)
 {
     (*actual_attrs)++;
 }
@@ -286,7 +274,7 @@ static double numeric_to_double_no_overflow(Numeric num) {
 }
 
 static void set_name_and_value(int* actual_attrs, MsgPackDecodingData	*data, Oid typid,
-                               Oid typoutput, char* name, Datum datum, bool isnull)
+                               Oid typoutput, char* name, Datum datum, char isnull)
 {
     Numeric num;
     char* output;
@@ -373,7 +361,7 @@ static void set_name_and_value(int* actual_attrs, MsgPackDecodingData	*data, Oid
 
 static void loop_attributes(LogicalDecodingContext *ctx, TupleDesc tupdesc, HeapTuple tuple, TupleDesc indexdesc,
                             bool replident,
-                            void (*call_back) (int* actual_attrs, MsgPackDecodingData	*data, Oid typid, Oid typoutput, char* name, Datum datum, bool isnull), int* actual_attrs)
+                            void (*call_back) (int* actual_attrs, MsgPackDecodingData	*data, Oid typid, Oid typoutput, char* name, Datum datum, char isnull), int* actual_attrs)
 {
     MsgPackDecodingData	*data;
     int natt;
@@ -386,21 +374,12 @@ static void loop_attributes(LogicalDecodingContext *ctx, TupleDesc tupdesc, Heap
         Oid					typid;		/* type of current attribute */
         HeapTuple			type_tuple;	/* information about a type */
         Oid					typoutput;	/* output function */
-        bool				typisvarlena;
+        char				typisvarlena;
         Datum				origval;	/* possibly toasted Datum */
         Datum				val;		/* definitely detoasted Datum */
-        bool				isnull;		/* column is null? */
+        char				isnull;		/* column is null? */
 
-        /*
-         * Commit d34a74dd064af959acd9040446925d9d53dff15b introduced
-         * TupleDescAttr() in back branches. If the version supports
-         * this macro, use it. Version 10 and later already support it.
-         */
-#if (PG_VERSION_NUM >= 90600 && PG_VERSION_NUM < 90605) || (PG_VERSION_NUM >= 90500 && PG_VERSION_NUM < 90509) || (PG_VERSION_NUM >= 90400 && PG_VERSION_NUM < 90414)
-        attr = tupdesc->attrs[natt];
-#else
         attr = TupleDescAttr(tupdesc, natt);
-#endif
 
         elog(DEBUG1, "attribute \"%s\" (%d/%d)", NameStr(attr->attname), natt, tupdesc->natts);
 
@@ -418,12 +397,7 @@ static void loop_attributes(LogicalDecodingContext *ctx, TupleDesc tupdesc, Heap
             {
                 Form_pg_attribute	iattr;
 
-                /* See explanation a few lines above. */
-#if (PG_VERSION_NUM >= 90600 && PG_VERSION_NUM < 90605) || (PG_VERSION_NUM >= 90500 && PG_VERSION_NUM < 90509) || (PG_VERSION_NUM >= 90400 && PG_VERSION_NUM < 90414)
-                iattr = indexdesc->attrs[j];
-#else
                 iattr = TupleDescAttr(indexdesc, j);
-#endif
 
                 if (strcmp(NameStr(attr->attname), NameStr(iattr->attname)) == 0)
                     found_col = true;
@@ -573,7 +547,6 @@ static bool filter_table(const MsgPackDecodingData *data, const char *schemaandt
 
     return processTable;
 }
-
 /* Callback for individual changed tuples */
 static void
 pg_decode_change(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
@@ -590,6 +563,7 @@ pg_decode_change(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
 
     AssertVariableIsOfType(&pg_decode_change, LogicalDecodeChangeCB);
 
+    elog(DEBUG1, "pg_decode_change wal2msgpack");
     data = ctx->output_plugin_private;
     class_form = RelationGetForm(relation);
 
@@ -615,7 +589,6 @@ pg_decode_change(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
         TupleDesc	tupdesc;
         size_t relNamespaceLength;
         size_t relNameLength;
-        int64 commit;
 
         tupdesc = RelationGetDescr(relation);
 
@@ -707,8 +680,7 @@ pg_decode_change(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
                 Assert(false);
         }
 
-        commit = TIMESTAMPTZ_TO_USEC_SINCE_EPOCH(txn->commit_time);
-        msgpack_pack_int64(data->pk, commit);
+        msgpack_pack_int64(data->pk, data->commit);
 
         relNamespaceLength = strlen(relNamespace);
         msgpack_pack_str(data->pk, relNamespaceLength);
@@ -790,20 +762,3 @@ pg_decode_change(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
         data->first_entry = false;
     }
 }
-
-/*
-static bool pg_decode_filter(LogicalDecodingContext *ctx, RepOriginId origin_id)
-{
-
-}
-*/
-
-#if	PG_VERSION_NUM >= 90600
-/* Callback for generic logical decoding messages */
-/*static void
-pg_decode_message(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
-                  XLogRecPtr lsn, bool transactional, const char *prefix, Size
-                  content_size, const char *content)
-{
-}*/
-#endif
