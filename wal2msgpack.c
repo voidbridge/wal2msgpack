@@ -2,6 +2,8 @@
 #include <replication/reorderbuffer.h>
 #include <catalog/pg_class.h>
 #include <utils/rel.h>
+#include <sys/stat.h>
+#include <zconf.h>
 #include "catalog/pg_type.h"
 
 #include "replication/logical.h"
@@ -37,6 +39,10 @@ typedef struct
 
     uint64		nentries;			/* txn->nentries */
 
+    uint64 max_entries;
+
+    uint64 filtered_entries;
+
     bool        first_entry;
 
     short     include;
@@ -49,6 +55,7 @@ typedef struct
 
     msgpack_sbuffer* sbuf;
     msgpack_packer* pk;
+
 } MsgPackDecodingData;
 
 
@@ -66,9 +73,11 @@ static void pg_decode_change(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
 
 static void write_event(LogicalDecodingContext *ctx, MsgPackDecodingData *data);
 
-static const int insert_event = 5;
-static const int update_event = 6;
-static const int delete_event = 7;
+static const int insert_change_type = 1;
+static const int update_change_type = 2;
+static const int delete_change_type = 3;
+static const int fill_change_type = 4;
+static const int batch_event = 8;
 
 void _PG_init(void)
 {
@@ -98,11 +107,18 @@ pg_decode_startup(LogicalDecodingContext *ctx, OutputPluginOptions *opt, char is
 
     data->context = AllocSetContextCreate(TopMemoryContext,
                                           "wal2msgpack output context",
+#if PG_VERSION_NUM >= 90600
                                           ALLOCSET_DEFAULT_SIZES
+#else
+                                          ALLOCSET_DEFAULT_MINSIZE,
+                                          ALLOCSET_DEFAULT_INITSIZE,
+                                          ALLOCSET_DEFAULT_MAXSIZE
+#endif
     );
 
     elog(DEBUG1, "pg_decode_startup wal2msgpack");
     data->nentries = 0;
+    data->max_entries = 1;
     data->first_entry = true;
     data->include = 0;
     data->exclude = 0;
@@ -186,6 +202,10 @@ pg_decode_startup(LogicalDecodingContext *ctx, OutputPluginOptions *opt, char is
             }
 
         }
+        else if (strcmp(elem->defname, "max-entries") == 0)
+        {
+            data->max_entries = (uint64)intVal(elem->arg);
+        }
         else
         {
             ereport(ERROR,
@@ -197,7 +217,6 @@ pg_decode_startup(LogicalDecodingContext *ctx, OutputPluginOptions *opt, char is
     }
     elog(DEBUG1, "completed pg_decode_startup wal2msgpack");
 }
-
 
 /* cleanup this plugin's resources */
 static void
@@ -218,8 +237,19 @@ pg_decode_begin_txn(LogicalDecodingContext *ctx, ReorderBufferTXN *txn) {
     elog(DEBUG1, "pg_decode_begin_txn wal2msgpack");
 
     data->nentries = txn->nentries;
+    data->filtered_entries = 0;
     data->first_entry = true;
     data->commit = TIMESTAMPTZ_TO_USEC_SINCE_EPOCH(txn->commit_time);
+
+    if(data->max_entries > data->nentries)
+    {
+        data->max_entries = data->nentries;
+    }
+
+    msgpack_sbuffer_clear(data->sbuf);
+    msgpack_pack_int8(data->pk, batch_event);
+    msgpack_pack_int64(data->pk, data->commit);
+    msgpack_pack_array(data->pk, data->max_entries);
 }
 
 static void
@@ -228,11 +258,25 @@ pg_decode_commit_txn(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
 {
     MsgPackDecodingData *data = ctx->output_plugin_private;
 
+    if(data->filtered_entries > 0)
+    {
+        uint64 fill_entries;
+        uint64 index;
+        //pack with empty changes
+        fill_entries = data->max_entries - data->filtered_entries;
+
+        for(index = 0;index <fill_entries;index++)
+        {
+            msgpack_pack_int8(data->pk, fill_change_type);
+        }
+        write_event(ctx, data);
+    }
+
     if (txn->has_catalog_changes)
         elog(DEBUG1, "txn has catalog changes: yes");
     else
         elog(DEBUG1, "txn has catalog changes: no");
-    elog(DEBUG1, "my change counter: %lu ; # of changes: %lu ; # of changes in memory: %lu", data->nentries, txn->nentries, txn->nentries_mem);
+    elog(DEBUG1, "max entries: %lu ; filtered entries: %lu ; # of changes: %lu ; # of changes in memory: %lu", data->max_entries, data->filtered_entries, txn->nentries, txn->nentries_mem);
     elog(DEBUG1, "# of subxacts: %d", txn->nsubtxns);
 }
 
@@ -343,9 +387,9 @@ static void set_name_and_value(int* actual_attrs, MsgPackDecodingData	*data, Oid
                  */
             case TIMESTAMPTZOID:
             {
-                int64 commit;
-                commit = TIMESTAMPTZ_TO_USEC_SINCE_EPOCH(DatumGetTimestampTz(datum));
-                msgpack_pack_int64(data->pk, commit);
+                int64 timestamp;
+                timestamp = TIMESTAMPTZ_TO_USEC_SINCE_EPOCH(DatumGetTimestampTz(datum));
+                msgpack_pack_int64(data->pk, timestamp);
                 break;
             }
             case BYTEAOID:
@@ -662,25 +706,22 @@ pg_decode_change(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
 
         /* Change counter */
         data->nentries = txn->nentries;
-        msgpack_sbuffer_clear(data->sbuf);
 
         /* Print change kind */
         switch (change->action)
         {
             case REORDER_BUFFER_CHANGE_INSERT:
-                msgpack_pack_int8(data->pk, insert_event);
+                msgpack_pack_int8(data->pk, insert_change_type);
                 break;
             case REORDER_BUFFER_CHANGE_UPDATE:
-                msgpack_pack_int8(data->pk, update_event);
+                msgpack_pack_int8(data->pk, update_change_type);
                 break;
             case REORDER_BUFFER_CHANGE_DELETE:
-                msgpack_pack_int8(data->pk, delete_event);
+                msgpack_pack_int8(data->pk, delete_change_type);
                 break;
             default:
                 Assert(false);
         }
-
-        msgpack_pack_int64(data->pk, data->commit);
 
         relNamespaceLength = strlen(relNamespace);
         msgpack_pack_str(data->pk, relNamespaceLength);
@@ -754,7 +795,7 @@ pg_decode_change(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
                 Assert(false);
         }
 
-        write_event(ctx, data);
+        data->filtered_entries++;
 
         MemoryContextSwitchTo(old);
         MemoryContextReset(data->context);
