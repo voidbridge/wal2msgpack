@@ -2,8 +2,6 @@
 #include <replication/reorderbuffer.h>
 #include <catalog/pg_class.h>
 #include <utils/rel.h>
-#include <sys/stat.h>
-#include <zconf.h>
 #include "catalog/pg_type.h"
 
 #include "replication/logical.h"
