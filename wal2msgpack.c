@@ -39,8 +39,6 @@ typedef struct
 
     uint64		nentries;			/* txn->nentries */
 
-    uint64 max_entries;
-
     uint64 filtered_entries;
 
     bool        first_entry;
@@ -71,12 +69,11 @@ static void pg_decode_change(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
                              Relation relation, ReorderBufferChange *change);
 
 
-static void write_event(LogicalDecodingContext *ctx, MsgPackDecodingData *data);
+static void write_event(LogicalDecodingContext *ctx, msgpack_sbuffer sbuf);
 
 static const int insert_change_type = 1;
 static const int update_change_type = 2;
 static const int delete_change_type = 3;
-static const int fill_change_type = 4;
 static const int batch_event = 8;
 
 void _PG_init(void)
@@ -118,7 +115,6 @@ pg_decode_startup(LogicalDecodingContext *ctx, OutputPluginOptions *opt, char is
 
     elog(DEBUG1, "pg_decode_startup wal2msgpack");
     data->nentries = 0;
-    data->max_entries = 1;
     data->first_entry = true;
     data->include = 0;
     data->exclude = 0;
@@ -202,10 +198,6 @@ pg_decode_startup(LogicalDecodingContext *ctx, OutputPluginOptions *opt, char is
             }
 
         }
-        else if (strcmp(elem->defname, "max-entries") == 0)
-        {
-            data->max_entries = (uint64)intVal(elem->arg);
-        }
         else
         {
             ereport(ERROR,
@@ -241,15 +233,7 @@ pg_decode_begin_txn(LogicalDecodingContext *ctx, ReorderBufferTXN *txn) {
     data->first_entry = true;
     data->commit = TIMESTAMPTZ_TO_USEC_SINCE_EPOCH(txn->commit_time);
 
-    if(data->max_entries > data->nentries)
-    {
-        data->max_entries = data->nentries;
-    }
-
     msgpack_sbuffer_clear(data->sbuf);
-    msgpack_pack_int8(data->pk, batch_event);
-    msgpack_pack_int64(data->pk, data->commit);
-    msgpack_pack_array(data->pk, data->max_entries);
 }
 
 static void
@@ -260,30 +244,36 @@ pg_decode_commit_txn(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
 
     if(data->filtered_entries > 0)
     {
-        uint64 fill_entries;
-        uint64 index;
-        //pack with empty changes
-        fill_entries = data->max_entries - data->filtered_entries;
+        msgpack_sbuffer sbuf;
+        msgpack_packer pk;
 
-        for(index = 0;index <fill_entries;index++)
-        {
-            msgpack_pack_int8(data->pk, fill_change_type);
-        }
-        write_event(ctx, data);
+        /* msgpack::sbuffer is a simple buffer implementation. */
+        msgpack_sbuffer_init(&sbuf);
+
+        /* serialize values into the buffer using msgpack_sbuffer_write callback function. */
+        msgpack_packer_init(&pk, &sbuf, msgpack_sbuffer_write);
+
+        msgpack_pack_int8(&pk, batch_event);
+        msgpack_pack_int64(&pk, data->commit);
+        msgpack_pack_array(&pk, data->filtered_entries);
+        msgpack_pack_ext_body(&pk, data->sbuf->data, data->sbuf->size);
+
+        write_event(ctx, sbuf);
+        msgpack_sbuffer_destroy(&sbuf);
     }
 
     if (txn->has_catalog_changes)
         elog(DEBUG1, "txn has catalog changes: yes");
     else
         elog(DEBUG1, "txn has catalog changes: no");
-    elog(DEBUG1, "max entries: %lu ; filtered entries: %lu ; # of changes: %lu ; # of changes in memory: %lu", data->max_entries, data->filtered_entries, txn->nentries, txn->nentries_mem);
+    elog(DEBUG1, "filtered entries: %lu ; # of changes: %lu ; # of changes in memory: %lu", data->filtered_entries, txn->nentries, txn->nentries_mem);
     elog(DEBUG1, "# of subxacts: %d", txn->nsubtxns);
 }
 
-static void write_event(LogicalDecodingContext *ctx, MsgPackDecodingData *data)
+static void write_event(LogicalDecodingContext *ctx, msgpack_sbuffer sbuf)
 {
     OutputPluginPrepareWrite(ctx, true);
-    appendBinaryStringInfo(ctx->out, data->sbuf->data, data->sbuf->size);
+    appendBinaryStringInfo(ctx->out, sbuf.data, sbuf.size);
     OutputPluginWrite(ctx, true);
 }
 
