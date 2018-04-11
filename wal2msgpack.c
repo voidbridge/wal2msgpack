@@ -1,7 +1,10 @@
 #include "postgres.h"
 #include <replication/reorderbuffer.h>
+#include <nodes/value.h>
+#include <nodes/parsenodes.h>
+#include <catalog/pg_class.h>
+#include <utils/rel.h>
 #include "catalog/pg_type.h"
-#include "utils/pg_lsn.h"
 
 #include "replication/logical.h"
 
