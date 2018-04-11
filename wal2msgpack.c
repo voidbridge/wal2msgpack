@@ -1,8 +1,7 @@
 #include "postgres.h"
 #include <replication/reorderbuffer.h>
-#include <catalog/pg_class.h>
-#include <utils/rel.h>
 #include "catalog/pg_type.h"
+#include "utils/pg_lsn.h"
 
 #include "replication/logical.h"
 
@@ -72,7 +71,7 @@ static void write_event(LogicalDecodingContext *ctx, msgpack_sbuffer sbuf);
 static const int insert_change_type = 1;
 static const int update_change_type = 2;
 static const int delete_change_type = 3;
-static const int batch_event = 8;
+static const int batch_event = 9;
 
 void _PG_init(void)
 {
@@ -253,6 +252,9 @@ pg_decode_commit_txn(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
 
         msgpack_pack_int8(&pk, batch_event);
         msgpack_pack_int64(&pk, data->commit);
+
+        msgpack_pack_uint64(&pk, txn->end_lsn);
+
         msgpack_pack_array(&pk, data->filtered_entries);
         msgpack_pack_ext_body(&pk, data->sbuf->data, data->sbuf->size);
 
