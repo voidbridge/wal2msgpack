@@ -47,7 +47,11 @@ typedef struct
 
     short     exclude;
 
+    short     include_message_prefixes;
+
     regex_t       tables[8];
+
+    regex_t     message_prefixes[8];
 
     int64 commit;
 
@@ -67,14 +71,27 @@ static void pg_decode_commit_txn(LogicalDecodingContext *ctx,
                                  ReorderBufferTXN *txn, XLogRecPtr commit_lsn);
 static void pg_decode_change(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
                              Relation relation, ReorderBufferChange *change);
+static void
+pg_decode_message(struct LogicalDecodingContext *ctx,
+                  ReorderBufferTXN *txn,
+                  XLogRecPtr message_lsn,
+                  char transactional,
+                  const char *prefix,
+                  Size message_size,
+                  const char *message);
 
 
 static void write_event(LogicalDecodingContext *ctx, msgpack_sbuffer sbuf);
 
+void writeMessage(const char *prefix, Size sz, const char *message,msgpack_packer* pk);
+
 static const int insert_change_type = 1;
 static const int update_change_type = 2;
 static const int delete_change_type = 3;
+static const int message_change_type = 4;
+
 static const int batch_event = 9;
+static const int single_event = 10;
 
 void _PG_init(void)
 {
@@ -90,6 +107,7 @@ void _PG_output_plugin_init(OutputPluginCallbacks *cb)
     cb->change_cb = pg_decode_change;
     cb->commit_cb = pg_decode_commit_txn;
     cb->shutdown_cb = pg_decode_shutdown;
+    cb->message_cb = pg_decode_message;
     elog(DEBUG1, "initialize wal2msgpack");
 }
 
@@ -118,6 +136,7 @@ pg_decode_startup(LogicalDecodingContext *ctx, OutputPluginOptions *opt, char is
     data->first_entry = true;
     data->include = 0;
     data->exclude = 0;
+    data->include_message_prefixes = 0;
 
     data->sbuf = msgpack_sbuffer_new();
     msgpack_sbuffer_init(data->sbuf);
@@ -195,6 +214,31 @@ pg_decode_startup(LogicalDecodingContext *ctx, OutputPluginOptions *opt, char is
 
                     token = strtok(NULL, ",");
                 }
+            }
+
+        }
+        else if (strcmp(elem->defname, "include-message-prefixes") == 0)
+        {
+            char *token;
+            data->include_message_prefixes = 0;
+
+            token = strtok(strVal(elem->arg), ",");
+
+            while( token != NULL )
+            {
+                int errorCode = regcomp(&data->message_prefixes[data->include_message_prefixes], token, 0);
+                if(errorCode != 0)
+                {
+                    char msgbuf[100];
+                    regerror(errorCode, &data->message_prefixes[data->include_message_prefixes], msgbuf, sizeof(msgbuf));
+                    elog(WARNING, "Unable to compile [%s] regex error [%s]", token, msgbuf );
+                }
+                else
+                {
+                    data->include_message_prefixes++;
+                }
+
+                token = strtok(NULL, ",");
             }
 
         }
@@ -529,10 +573,9 @@ identity_to_stringinfo(LogicalDecodingContext *ctx, TupleDesc tupdesc, HeapTuple
 
 static bool filter_table(const MsgPackDecodingData *data, const char *schemaandtable, int errorCode) {
     bool processTable;
-    processTable = true;
+    processTable = false;
     if (data->include > 0)
     {
-        bool matched = false;
         int n;
         for(n = 0; n < data->include;n++)
         {
@@ -540,7 +583,7 @@ static bool filter_table(const MsgPackDecodingData *data, const char *schemaandt
             errorCode = regexec(&data->tables[n], schemaandtable, 0, NULL, 0);
             if (errorCode == 0)
             {
-                matched = true;
+                processTable = true;
                 break;
             }
             else if (errorCode != REG_NOMATCH)
@@ -551,21 +594,17 @@ static bool filter_table(const MsgPackDecodingData *data, const char *schemaandt
             }
         }
 
-        if(!matched)
-        {
-            processTable = false;
-        }
     }
     else if (data->exclude > 0)
     {
-        bool matched = false;
+        processTable = true;
         int n;
         for(n = 0;n < data->exclude;n++)
         {
             errorCode = regexec(&data->tables[n], schemaandtable, 0, NULL, 0);
             if (errorCode == 0)
             {
-                matched = true;
+                processTable = false;
                 break;
             }
             else if (errorCode != REG_NOMATCH)
@@ -574,11 +613,6 @@ static bool filter_table(const MsgPackDecodingData *data, const char *schemaandt
                 regerror(errorCode, &data->tables[n], msgbuf, sizeof(msgbuf));
                 elog(WARNING, "Unable to execute regex [%d] on relationship [%s] error [%s]", n, schemaandtable, msgbuf );
             }
-        }
-
-        if(matched)
-        {
-            processTable = false;
         }
     }
 
@@ -795,4 +829,90 @@ pg_decode_change(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
 
         data->first_entry = false;
     }
+}
+
+static void
+pg_decode_message(struct LogicalDecodingContext *ctx,
+                  ReorderBufferTXN *txn,
+                  XLogRecPtr message_lsn,
+                  char transactional,
+                  const char *prefix,
+                  Size message_size,
+                  const char *message)
+{
+    MsgPackDecodingData *data;
+    bool matched = false;
+    int errorCode;
+
+    data = ctx->output_plugin_private;
+
+    if (data->include_message_prefixes > 0)
+    {
+        int n;
+        for(n = 0; n < data->include_message_prefixes;n++)
+        {
+
+            errorCode = regexec(&data->message_prefixes[n], prefix, 0, NULL, 0);
+            if (errorCode == 0)
+            {
+                matched = true;
+                break;
+            }
+            else if (errorCode != REG_NOMATCH)
+            {
+                char msgbuf[100];
+                regerror(errorCode, &data->tables[n], msgbuf, sizeof(msgbuf));
+                elog(WARNING, "Unable to execute regex [%d] on prefix [%s] error [%s]", n, prefix, msgbuf );
+            }
+        }
+
+    }
+
+    if(matched)
+    {
+        MemoryContext old;
+        /* Avoid leaking memory by using and resetting our own context */
+        old = MemoryContextSwitchTo(data->context);
+
+        if (transactional)
+        {
+            elog(DEBUG1, "writing transactional pg_decode_message");
+            msgpack_pack_int8(data->pk, message_change_type);
+            writeMessage(prefix, message_size, message, data->pk);
+            data->filtered_entries++;
+        }
+        else
+        {
+            elog(DEBUG1, "writing none transactional pg_decode_message");
+            msgpack_sbuffer sbuf;
+            msgpack_packer pk;
+
+            /* msgpack::sbuffer is a simple buffer implementation. */
+            msgpack_sbuffer_init(&sbuf);
+
+            /* serialize values into the buffer using msgpack_sbuffer_write callback function. */
+            msgpack_packer_init(&pk, &sbuf, msgpack_sbuffer_write);
+
+            msgpack_pack_int8(&pk, single_event);
+
+            writeMessage(prefix, message_size, message, &pk);
+
+            write_event(ctx, sbuf);
+            msgpack_sbuffer_destroy(&sbuf);
+        }
+
+        MemoryContextSwitchTo(old);
+        MemoryContextReset(data->context);
+    }
+}
+
+void writeMessage(const char *prefix, Size sz, const char *message,msgpack_packer* pk)
+{
+    size_t stringLength;
+    stringLength = strlen(prefix);
+    msgpack_pack_str(pk, stringLength);
+    msgpack_pack_str_body(pk, prefix, stringLength);
+
+    msgpack_pack_str(pk, sz);
+    msgpack_pack_str_body(pk, message, sz);
 }
