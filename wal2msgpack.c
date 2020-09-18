@@ -49,7 +49,7 @@ typedef struct
 
     short     include_message_prefixes;
 
-    regex_t       tables[8];
+	char tables[8][255+1];
 
     regex_t     message_prefixes[8];
 
@@ -168,17 +168,8 @@ pg_decode_startup(LogicalDecodingContext *ctx, OutputPluginOptions *opt, char is
                 token = strtok(strVal(elem->arg), ",");
                 while( token != NULL )
                 {
-                    int errorCode = regcomp(&data->tables[data->include], token, 0);
-                    if(errorCode != 0)
-                    {
-                        char msgbuf[100];
-                        regerror(errorCode, &data->tables[data->include], msgbuf, sizeof(msgbuf));
-                        elog(WARNING, "Unable to compile [%s] regex error [%s]", token, msgbuf );
-                    }
-                    else
-                    {
-                        data->include++;
-                    }
+                	strcpy(&data->tables[data->include], token);
+                    data->include++;
 
                     token = strtok(NULL, ",");
                 }
@@ -200,17 +191,8 @@ pg_decode_startup(LogicalDecodingContext *ctx, OutputPluginOptions *opt, char is
 
                 while( token != NULL )
                 {
-                    int errorCode = regcomp(&data->tables[data->exclude], token, 0);
-                    if(errorCode != 0)
-                    {
-                        char msgbuf[100];
-                        regerror(errorCode, &data->tables[data->include], msgbuf, sizeof(msgbuf));
-                        elog(WARNING, "Unable to compile [%s] regex error [%s]", token, msgbuf );
-                    }
-                    else
-                    {
-                        data->exclude++;
-                    }
+                	strcpy(&data->tables[data->exclude], token);
+                    data->exclude++;
 
                     token = strtok(NULL, ",");
                 }
@@ -580,17 +562,10 @@ static bool filter_table(const MsgPackDecodingData *data, const char *schemaandt
         for(n = 0; n < data->include;n++)
         {
 
-            errorCode = regexec(&data->tables[n], schemaandtable, 0, NULL, 0);
-            if (errorCode == 0)
+            if (strcmp(&data->tables[n], schemaandtable) == 0)
             {
                 processTable = true;
                 break;
-            }
-            else if (errorCode != REG_NOMATCH)
-            {
-                char msgbuf[100];
-                regerror(errorCode, &data->tables[n], msgbuf, sizeof(msgbuf));
-                elog(WARNING, "Unable to execute regex [%d] on relationship [%s] error [%s]", n, schemaandtable, msgbuf );
             }
         }
 
@@ -601,17 +576,11 @@ static bool filter_table(const MsgPackDecodingData *data, const char *schemaandt
         int n;
         for(n = 0;n < data->exclude;n++)
         {
-            errorCode = regexec(&data->tables[n], schemaandtable, 0, NULL, 0);
-            if (errorCode == 0)
+
+            if (strcmp(&data->tables[n], schemaandtable) == 0)
             {
                 processTable = false;
                 break;
-            }
-            else if (errorCode != REG_NOMATCH)
-            {
-                char msgbuf[100];
-                regerror(errorCode, &data->tables[n], msgbuf, sizeof(msgbuf));
-                elog(WARNING, "Unable to execute regex [%d] on relationship [%s] error [%s]", n, schemaandtable, msgbuf );
             }
         }
     }
@@ -861,7 +830,7 @@ pg_decode_message(struct LogicalDecodingContext *ctx,
             else if (errorCode != REG_NOMATCH)
             {
                 char msgbuf[100];
-                regerror(errorCode, &data->tables[n], msgbuf, sizeof(msgbuf));
+                regerror(errorCode, &data->message_prefixes[n], msgbuf, sizeof(msgbuf));
                 elog(WARNING, "Unable to execute regex [%d] on prefix [%s] error [%s]", n, prefix, msgbuf );
             }
         }
