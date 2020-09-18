@@ -168,7 +168,7 @@ pg_decode_startup(LogicalDecodingContext *ctx, OutputPluginOptions *opt, char is
                 token = strtok(strVal(elem->arg), ",");
                 while( token != NULL )
                 {
-                	strcpy(&data->tables[data->include], token);
+                	strcpy(data->tables[data->include], token);
                     data->include++;
 
                     token = strtok(NULL, ",");
@@ -191,7 +191,7 @@ pg_decode_startup(LogicalDecodingContext *ctx, OutputPluginOptions *opt, char is
 
                 while( token != NULL )
                 {
-                	strcpy(&data->tables[data->exclude], token);
+                	strcpy(data->tables[data->exclude], token);
                     data->exclude++;
 
                     token = strtok(NULL, ",");
@@ -562,7 +562,7 @@ static bool filter_table(const MsgPackDecodingData *data, const char *schemaandt
         for(n = 0; n < data->include;n++)
         {
 
-            if (strcmp(&data->tables[n], schemaandtable) == 0)
+            if (strcmp(data->tables[n], schemaandtable) == 0)
             {
                 processTable = true;
                 break;
@@ -577,7 +577,7 @@ static bool filter_table(const MsgPackDecodingData *data, const char *schemaandt
         for(n = 0;n < data->exclude;n++)
         {
 
-            if (strcmp(&data->tables[n], schemaandtable) == 0)
+            if (strcmp(data->tables[n], schemaandtable) == 0)
             {
                 processTable = false;
                 break;
