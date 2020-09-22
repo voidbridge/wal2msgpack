@@ -37,11 +37,9 @@ typedef struct
 {
     MemoryContext context;
 
-    uint64		nentries;			/* txn->nentries */
-
+    bool            write_in_chunks;        /* write in chunks? */
+	
     uint64 filtered_entries;
-
-    bool        first_entry;
 
     short     include;
 
@@ -53,10 +51,10 @@ typedef struct
 
     regex_t     message_prefixes[8];
 
-    int64 commit;
-
+	/*  Used for the accumulation of the batch we want to write (filtered by table).  */
     msgpack_sbuffer* sbuf;
     msgpack_packer* pk;
+
 
 } MsgPackDecodingData;
 
@@ -81,7 +79,7 @@ pg_decode_message(struct LogicalDecodingContext *ctx,
                   const char *message);
 
 
-static void write_event(LogicalDecodingContext *ctx, msgpack_sbuffer sbuf);
+static void write_event(LogicalDecodingContext *ctx);
 
 void writeMessage(const char *prefix, Size sz, const char *message,msgpack_packer* pk);
 
@@ -90,8 +88,8 @@ static const int update_change_type = 2;
 static const int delete_change_type = 3;
 static const int message_change_type = 4;
 
-static const int batch_event = 9;
-static const int single_event = 10;
+static const int none_transactional_event = 10;
+static const int transactional_event = 11;
 
 void _PG_init(void)
 {
@@ -132,11 +130,10 @@ pg_decode_startup(LogicalDecodingContext *ctx, OutputPluginOptions *opt, char is
     );
 
     elog(DEBUG1, "pg_decode_startup wal2msgpack");
-    data->nentries = 0;
-    data->first_entry = true;
     data->include = 0;
     data->exclude = 0;
     data->include_message_prefixes = 0;
+    data->write_in_chunks = false;
 
     data->sbuf = msgpack_sbuffer_new();
     msgpack_sbuffer_init(data->sbuf);
@@ -224,6 +221,19 @@ pg_decode_startup(LogicalDecodingContext *ctx, OutputPluginOptions *opt, char is
             }
 
         }
+        else if (strcmp(elem->defname, "write-in-chunks") == 0)
+        {
+            if (elem->arg == NULL)
+            {
+                      elog(LOG, "write-in-chunks argument is null");
+                      data->write_in_chunks = true;
+            }
+            else if (!parse_bool(strVal(elem->arg), &data->write_in_chunks))
+                    ereport(ERROR,
+                                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                                 errmsg("could not parse value \"%s\" for parameter \"%s\"",
+                                 strVal(elem->arg), elem->defname)));
+        }
         else
         {
             ereport(ERROR,
@@ -254,12 +264,14 @@ pg_decode_begin_txn(LogicalDecodingContext *ctx, ReorderBufferTXN *txn) {
     MsgPackDecodingData *data = ctx->output_plugin_private;
     elog(DEBUG1, "pg_decode_begin_txn wal2msgpack");
 
-    data->nentries = txn->nentries;
     data->filtered_entries = 0;
-    data->first_entry = true;
-    data->commit = TIMESTAMPTZ_TO_USEC_SINCE_EPOCH(txn->commit_time);
 
     msgpack_sbuffer_clear(data->sbuf);
+
+    msgpack_pack_int8(data->pk, transactional_event);
+    int64 commit = TIMESTAMPTZ_TO_USEC_SINCE_EPOCH(txn->commit_time);
+    msgpack_pack_int64(data->pk, commit);
+    msgpack_pack_uint64(data->pk, txn->end_lsn);
 }
 
 static void
@@ -268,27 +280,9 @@ pg_decode_commit_txn(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
 {
     MsgPackDecodingData *data = ctx->output_plugin_private;
 
-    if(data->filtered_entries > 0)
+    if(!data->write_in_chunks)
     {
-        msgpack_sbuffer sbuf;
-        msgpack_packer pk;
-
-        /* msgpack::sbuffer is a simple buffer implementation. */
-        msgpack_sbuffer_init(&sbuf);
-
-        /* serialize values into the buffer using msgpack_sbuffer_write callback function. */
-        msgpack_packer_init(&pk, &sbuf, msgpack_sbuffer_write);
-
-        msgpack_pack_int8(&pk, batch_event);
-        msgpack_pack_int64(&pk, data->commit);
-
-        msgpack_pack_uint64(&pk, txn->end_lsn);
-
-        msgpack_pack_array(&pk, data->filtered_entries);
-        msgpack_pack_ext_body(&pk, data->sbuf->data, data->sbuf->size);
-
-        write_event(ctx, sbuf);
-        msgpack_sbuffer_destroy(&sbuf);
+	    write_event(ctx);
     }
 
     if (txn->has_catalog_changes)
@@ -297,13 +291,22 @@ pg_decode_commit_txn(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
         elog(DEBUG1, "txn has catalog changes: no");
     elog(DEBUG1, "filtered entries: %lu ; # of changes: %lu ; # of changes in memory: %lu", data->filtered_entries, txn->nentries, txn->nentries_mem);
     elog(DEBUG1, "# of subxacts: %d", txn->nsubtxns);
+
+    /* clear the user data msg-pack buffer for next use */
+    msgpack_sbuffer_clear(data->sbuf);
+	
+    data->filtered_entries = 0;
 }
 
-static void write_event(LogicalDecodingContext *ctx, msgpack_sbuffer sbuf)
+static void write_event(LogicalDecodingContext *ctx)
 {
+    MsgPackDecodingData *data = ctx->output_plugin_private;
+
     OutputPluginPrepareWrite(ctx, true);
-    appendBinaryStringInfo(ctx->out, sbuf.data, sbuf.size);
+    appendBinaryStringInfo(ctx->out, data->sbuf->data, data->sbuf->size);
     OutputPluginWrite(ctx, true);
+
+    msgpack_sbuffer_clear(data->sbuf);
 }
 
 
@@ -700,9 +703,6 @@ pg_decode_change(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
                 Assert(false);
         }
 
-        /* Change counter */
-        data->nentries = txn->nentries;
-
         /* Print change kind */
         switch (change->action)
         {
@@ -793,10 +793,14 @@ pg_decode_change(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
 
         data->filtered_entries++;
 
+    	if(data->write_in_chunks)
+    	{
+	        write_event(ctx);
+    	}
+	
         MemoryContextSwitchTo(old);
         MemoryContextReset(data->context);
 
-        data->first_entry = false;
     }
 }
 
@@ -849,6 +853,10 @@ pg_decode_message(struct LogicalDecodingContext *ctx,
             msgpack_pack_int8(data->pk, message_change_type);
             writeMessage(prefix, message_size, message, data->pk);
             data->filtered_entries++;
+    		if(data->write_in_chunks)
+    		{
+	        	write_event(ctx);
+    		}
         }
         else
         {
@@ -862,11 +870,14 @@ pg_decode_message(struct LogicalDecodingContext *ctx,
             /* serialize values into the buffer using msgpack_sbuffer_write callback function. */
             msgpack_packer_init(&pk, &sbuf, msgpack_sbuffer_write);
 
-            msgpack_pack_int8(&pk, single_event);
+            msgpack_pack_int8(&pk, none_transactional_event);
 
             writeMessage(prefix, message_size, message, &pk);
 
-            write_event(ctx, sbuf);
+    		OutputPluginPrepareWrite(ctx, true);
+    		appendBinaryStringInfo(ctx->out, sbuf.data, sbuf.size);
+    		OutputPluginWrite(ctx, true);
+            
             msgpack_sbuffer_destroy(&sbuf);
         }
 
