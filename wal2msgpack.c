@@ -280,7 +280,7 @@ pg_decode_commit_txn(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
 {
     MsgPackDecodingData *data = ctx->output_plugin_private;
 
-    if(!data->write_in_chunks)
+    if(!data->write_in_chunks && data->filtered_entries > 0)
     {
 	    write_event(ctx);
     }
