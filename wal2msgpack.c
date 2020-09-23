@@ -37,6 +37,7 @@ typedef struct
 {
     MemoryContext context;
 
+	bool			new_transactional; /* you can't have write_in_chunks=true if using new_transactional=false */
     bool            write_in_chunks;        /* write in chunks? */
 	
     uint64 filtered_entries;
@@ -79,7 +80,7 @@ pg_decode_message(struct LogicalDecodingContext *ctx,
                   const char *message);
 
 
-static void write_event(LogicalDecodingContext *ctx);
+static void write_event(LogicalDecodingContext *ctx, msgpack_sbuffer *sbuf);
 
 void writeMessage(const char *prefix, Size sz, const char *message,msgpack_packer* pk);
 
@@ -88,6 +89,7 @@ static const int update_change_type = 2;
 static const int delete_change_type = 3;
 static const int message_change_type = 4;
 
+static const int old_transactional_event = 9;
 static const int none_transactional_event = 10;
 static const int transactional_event = 11;
 
@@ -134,6 +136,7 @@ pg_decode_startup(LogicalDecodingContext *ctx, OutputPluginOptions *opt, char is
     data->exclude = 0;
     data->include_message_prefixes = 0;
     data->write_in_chunks = false;
+    data->new_transactional = false;
 
     data->sbuf = msgpack_sbuffer_new();
     msgpack_sbuffer_init(data->sbuf);
@@ -234,6 +237,19 @@ pg_decode_startup(LogicalDecodingContext *ctx, OutputPluginOptions *opt, char is
                                  errmsg("could not parse value \"%s\" for parameter \"%s\"",
                                  strVal(elem->arg), elem->defname)));
         }
+        else if (strcmp(elem->defname, "new-transactional") == 0)
+        {
+            if (elem->arg == NULL)
+            {
+                      elog(LOG, "new-transactional argument is null");
+                      data->new_transactional = true;
+            }
+            else if (!parse_bool(strVal(elem->arg), &data->new_transactional))
+                    ereport(ERROR,
+                                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                                 errmsg("could not parse value \"%s\" for parameter \"%s\"",
+                                 strVal(elem->arg), elem->defname)));
+        }
         else
         {
             ereport(ERROR,
@@ -243,6 +259,13 @@ pg_decode_startup(LogicalDecodingContext *ctx, OutputPluginOptions *opt, char is
                                    elem->arg ? strVal(elem->arg) : "(null)")));
         }
     }
+    
+    if (!data->new_transactional && data->write_in_chunks)
+    {
+    	data->write_in_chunks = false;
+    	elog(WARNING, "Attempt to use write-in-chunks with old transactional batching (type 9) wal2msgpack");
+    }
+    
     elog(DEBUG1, "completed pg_decode_startup wal2msgpack");
 }
 
@@ -268,10 +291,49 @@ pg_decode_begin_txn(LogicalDecodingContext *ctx, ReorderBufferTXN *txn) {
 
     msgpack_sbuffer_clear(data->sbuf);
 
-    msgpack_pack_int8(data->pk, transactional_event);
+	if (data->new_transactional)
+	{
+	    msgpack_pack_int8(data->pk, transactional_event);
+    	int64 commit = TIMESTAMPTZ_TO_USEC_SINCE_EPOCH(txn->commit_time);
+	    msgpack_pack_int64(data->pk, commit);
+    	msgpack_pack_uint64(data->pk, txn->end_lsn);
+	}
+}
+
+static void
+write_old_transactional(LogicalDecodingContext *ctx, ReorderBufferTXN *txn)
+{
+    msgpack_sbuffer sbuf;
+    msgpack_packer pk;
+    MsgPackDecodingData *data = ctx->output_plugin_private;
+
+    /* msgpack::sbuffer is a simple buffer implementation. */
+    msgpack_sbuffer_init(&sbuf);
+
+    /* serialize values into the buffer using msgpack_sbuffer_write callback function. */
+    msgpack_packer_init(&pk, &sbuf, msgpack_sbuffer_write);
+
+    msgpack_pack_int8(&pk, old_transactional_event);
     int64 commit = TIMESTAMPTZ_TO_USEC_SINCE_EPOCH(txn->commit_time);
-    msgpack_pack_int64(data->pk, commit);
-    msgpack_pack_uint64(data->pk, txn->end_lsn);
+    msgpack_pack_int64(&pk, commit);
+
+    msgpack_pack_uint64(&pk, txn->end_lsn);
+
+    msgpack_pack_array(&pk, data->filtered_entries);
+    msgpack_pack_ext_body(&pk, data->sbuf->data, data->sbuf->size);
+
+    write_event(ctx, &sbuf);
+    msgpack_sbuffer_destroy(&sbuf);
+
+}
+
+static void write_new_event(LogicalDecodingContext *ctx)
+{
+    MsgPackDecodingData *data = ctx->output_plugin_private;
+
+    write_event(ctx, data->sbuf);
+
+    msgpack_sbuffer_clear(data->sbuf);
 }
 
 static void
@@ -282,7 +344,14 @@ pg_decode_commit_txn(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
 
     if(!data->write_in_chunks && data->filtered_entries > 0)
     {
-	    write_event(ctx);
+    	if (data->new_transactional)
+    	{
+		    write_new_event(ctx);
+    	}
+    	else
+    	{
+    		write_old_transactional(ctx, txn);
+    	}
     }
 
     if (txn->has_catalog_changes)
@@ -298,15 +367,11 @@ pg_decode_commit_txn(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
     data->filtered_entries = 0;
 }
 
-static void write_event(LogicalDecodingContext *ctx)
+static void write_event(LogicalDecodingContext *ctx, msgpack_sbuffer *sbuf)
 {
-    MsgPackDecodingData *data = ctx->output_plugin_private;
-
     OutputPluginPrepareWrite(ctx, true);
-    appendBinaryStringInfo(ctx->out, data->sbuf->data, data->sbuf->size);
+    appendBinaryStringInfo(ctx->out, sbuf->data, sbuf->size);
     OutputPluginWrite(ctx, true);
-
-    msgpack_sbuffer_clear(data->sbuf);
 }
 
 
@@ -795,7 +860,7 @@ pg_decode_change(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
 
     	if(data->write_in_chunks)
     	{
-	        write_event(ctx);
+	        write_new_event(ctx);
     	}
 	
         MemoryContextSwitchTo(old);
@@ -855,7 +920,7 @@ pg_decode_message(struct LogicalDecodingContext *ctx,
             data->filtered_entries++;
     		if(data->write_in_chunks)
     		{
-	        	write_event(ctx);
+	        	write_new_event(ctx);
     		}
         }
         else
