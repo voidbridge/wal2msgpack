@@ -89,9 +89,8 @@ static const int update_change_type = 2;
 static const int delete_change_type = 3;
 static const int message_change_type = 4;
 
-static const int old_transactional_event = 9;
 static const int none_transactional_event = 10;
-static const int transactional_event = 11;
+static const int transactional_event = 9;
 
 void _PG_init(void)
 {
@@ -290,21 +289,14 @@ pg_decode_begin_txn(LogicalDecodingContext *ctx, ReorderBufferTXN *txn) {
     data->filtered_entries = 0;
 
     msgpack_sbuffer_clear(data->sbuf);
-
-	if (data->new_transactional)
-	{
-	    msgpack_pack_int8(data->pk, transactional_event);
-    	int64 commit = TIMESTAMPTZ_TO_USEC_SINCE_EPOCH(txn->commit_time);
-	    msgpack_pack_int64(data->pk, commit);
-    	msgpack_pack_uint64(data->pk, txn->end_lsn);
-	}
 }
 
 static void
-write_old_transactional(LogicalDecodingContext *ctx, ReorderBufferTXN *txn)
+write_transactional_batch(LogicalDecodingContext *ctx, TimestampTz commit_time, XLogRecPtr lsn)
 {
     msgpack_sbuffer sbuf;
     msgpack_packer pk;
+    int64 commit;
     MsgPackDecodingData *data = ctx->output_plugin_private;
 
     /* msgpack::sbuffer is a simple buffer implementation. */
@@ -313,26 +305,16 @@ write_old_transactional(LogicalDecodingContext *ctx, ReorderBufferTXN *txn)
     /* serialize values into the buffer using msgpack_sbuffer_write callback function. */
     msgpack_packer_init(&pk, &sbuf, msgpack_sbuffer_write);
 
-    msgpack_pack_int8(&pk, old_transactional_event);
-    int64 commit = TIMESTAMPTZ_TO_USEC_SINCE_EPOCH(txn->commit_time);
+	msgpack_pack_int8(&pk, transactional_event);
+	commit = TIMESTAMPTZ_TO_USEC_SINCE_EPOCH(commit_time);
     msgpack_pack_int64(&pk, commit);
-
-    msgpack_pack_uint64(&pk, txn->end_lsn);
-
-    msgpack_pack_array(&pk, data->filtered_entries);
+    msgpack_pack_uint64(&pk, lsn);
+	msgpack_pack_array(&pk, data->filtered_entries);
     msgpack_pack_ext_body(&pk, data->sbuf->data, data->sbuf->size);
 
     write_event(ctx, &sbuf);
     msgpack_sbuffer_destroy(&sbuf);
-
-}
-
-static void write_new_event(LogicalDecodingContext *ctx)
-{
-    MsgPackDecodingData *data = ctx->output_plugin_private;
-
-    write_event(ctx, data->sbuf);
-
+    
     msgpack_sbuffer_clear(data->sbuf);
 }
 
@@ -342,16 +324,9 @@ pg_decode_commit_txn(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
 {
     MsgPackDecodingData *data = ctx->output_plugin_private;
 
-    if(!data->write_in_chunks && data->filtered_entries > 0)
+    if(data->filtered_entries > 0)
     {
-    	if (data->new_transactional)
-    	{
-		    write_new_event(ctx);
-    	}
-    	else
-    	{
-    		write_old_transactional(ctx, txn);
-    	}
+    	write_transactional_batch(ctx, txn->commit_time, txn->end_lsn);
     }
 
     if (txn->has_catalog_changes)
@@ -858,9 +833,10 @@ pg_decode_change(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
 
         data->filtered_entries++;
 
-    	if(data->write_in_chunks)
+    	if(data->write_in_chunks && data->filtered_entries >= 2)
     	{
-	        write_new_event(ctx);
+	        write_transactional_batch(ctx, txn->commit_time, change->lsn);
+	        data->filtered_entries = 0;
     	}
 	
         MemoryContextSwitchTo(old);
@@ -918,9 +894,10 @@ pg_decode_message(struct LogicalDecodingContext *ctx,
             msgpack_pack_int8(data->pk, message_change_type);
             writeMessage(prefix, message_size, message, data->pk);
             data->filtered_entries++;
-    		if(data->write_in_chunks)
+	    	if(data->write_in_chunks && data->filtered_entries >= 2)
     		{
-	        	write_new_event(ctx);
+	    	    write_transactional_batch(ctx, txn->commit_time, message_lsn);
+	        	data->filtered_entries = 0;
     		}
         }
         else
