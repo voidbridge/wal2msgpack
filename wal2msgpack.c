@@ -38,7 +38,7 @@ typedef struct
     MemoryContext context;
 
 	bool			new_transactional; /* you can't have max_batch_size!=0 if using new_transactional=false */
-    int16           max_batch_size;        /* when max batch is reached, write the chunk, 
+    int32           max_batch_size;        /* when max batch is reached, write the chunk, 
     										* if max_batch_size=0 there is no batching, just wait till commit function called and write everything 
     										*/
 	
