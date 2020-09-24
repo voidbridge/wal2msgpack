@@ -234,7 +234,7 @@ pg_decode_startup(LogicalDecodingContext *ctx, OutputPluginOptions *opt, char is
             }
             else
             {
-            	data->max_batch_size = pg_strtoint16(strVal(elem->arg));
+            	data->max_batch_size = pg_atoi(strVal(elem->arg), sizeof(int32), 0);
             	if (data->max_batch_size < 0)
             	{
             		/* Any value less than 0 is the same as zero ie save batch to end and send everything */
