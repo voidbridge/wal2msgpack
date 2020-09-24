@@ -37,8 +37,10 @@ typedef struct
 {
     MemoryContext context;
 
-	bool			new_transactional; /* you can't have write_in_chunks=true if using new_transactional=false */
-    bool            write_in_chunks;        /* write in chunks? */
+	bool			new_transactional; /* you can't have max_batch_size!=0 if using new_transactional=false */
+    int16           max_batch_size;        /* when max batch is reached, write the chunk, 
+    										* if max_batch_size=0 there is no batching, just wait till commit function called and write everything 
+    										*/
 	
     uint64 filtered_entries;
 
@@ -134,7 +136,7 @@ pg_decode_startup(LogicalDecodingContext *ctx, OutputPluginOptions *opt, char is
     data->include = 0;
     data->exclude = 0;
     data->include_message_prefixes = 0;
-    data->write_in_chunks = false;
+    data->max_batch_size = 0;
     data->new_transactional = false;
 
     data->sbuf = msgpack_sbuffer_new();
@@ -223,18 +225,22 @@ pg_decode_startup(LogicalDecodingContext *ctx, OutputPluginOptions *opt, char is
             }
 
         }
-        else if (strcmp(elem->defname, "write-in-chunks") == 0)
+        else if (strcmp(elem->defname, "max-batch-size") == 0)
         {
             if (elem->arg == NULL)
             {
-                      elog(LOG, "write-in-chunks argument is null");
-                      data->write_in_chunks = true;
+                 elog(LOG, "max-batch-size argument is null");
+                 data->max_batch_size = 0;
             }
-            else if (!parse_bool(strVal(elem->arg), &data->write_in_chunks))
-                    ereport(ERROR,
-                                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-                                 errmsg("could not parse value \"%s\" for parameter \"%s\"",
-                                 strVal(elem->arg), elem->defname)));
+            else
+            {
+            	data->max_batch_size = pg_strtoint16(strVal(elem->arg));
+            	if (data->max_batch_size < 0)
+            	{
+            		/* Any value less than 0 is the same as zero ie save batch to end and send everything */
+            		data->max_batch_size = 0;
+            	}
+            }
         }
         else if (strcmp(elem->defname, "new-transactional") == 0)
         {
@@ -259,10 +265,10 @@ pg_decode_startup(LogicalDecodingContext *ctx, OutputPluginOptions *opt, char is
         }
     }
     
-    if (!data->new_transactional && data->write_in_chunks)
+    if (!data->new_transactional && data->max_batch_size != 0)
     {
-    	data->write_in_chunks = false;
-    	elog(WARNING, "Attempt to use write-in-chunks with old transactional batching (type 9) wal2msgpack");
+    	data->max_batch_size = 0;
+    	elog(WARNING, "Attempt to use max-batch-size with old transactional batching (type 9) wal2msgpack");
     }
     
     elog(DEBUG1, "completed pg_decode_startup wal2msgpack");
@@ -833,7 +839,7 @@ pg_decode_change(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
 
         data->filtered_entries++;
 
-    	if(data->write_in_chunks && data->filtered_entries >= 2)
+    	if(data->max_batch_size != 0 && data->filtered_entries >= data->max_batch_size)
     	{
 	        write_transactional_batch(ctx, txn->commit_time, change->lsn);
 	        data->filtered_entries = 0;
@@ -894,7 +900,7 @@ pg_decode_message(struct LogicalDecodingContext *ctx,
             msgpack_pack_int8(data->pk, message_change_type);
             writeMessage(prefix, message_size, message, data->pk);
             data->filtered_entries++;
-	    	if(data->write_in_chunks && data->filtered_entries >= 2)
+	    	if(data->max_batch_size != 0 && data->filtered_entries >= data->max_batch_size)
     		{
 	    	    write_transactional_batch(ctx, txn->commit_time, message_lsn);
 	        	data->filtered_entries = 0;
