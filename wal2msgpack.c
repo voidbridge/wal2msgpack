@@ -37,7 +37,6 @@ typedef struct
 {
     MemoryContext context;
 
-	bool			new_transactional; /* you can't have max_batch_size!=0 if using new_transactional=false */
     int32           max_batch_size;        /* when max batch is reached, write the chunk, 
     										* if max_batch_size=0 there is no batching, just wait till commit function called and write everything 
     										*/
@@ -92,7 +91,7 @@ static const int delete_change_type = 3;
 static const int message_change_type = 4;
 
 static const int none_transactional_event = 10;
-static const int transactional_event = 9;
+static const int transactional_event = 11;
 
 void _PG_init(void)
 {
@@ -137,7 +136,6 @@ pg_decode_startup(LogicalDecodingContext *ctx, OutputPluginOptions *opt, char is
     data->exclude = 0;
     data->include_message_prefixes = 0;
     data->max_batch_size = 0;
-    data->new_transactional = false;
 
     data->sbuf = msgpack_sbuffer_new();
     msgpack_sbuffer_init(data->sbuf);
@@ -242,19 +240,6 @@ pg_decode_startup(LogicalDecodingContext *ctx, OutputPluginOptions *opt, char is
             	}
             }
         }
-        else if (strcmp(elem->defname, "new-transactional") == 0)
-        {
-            if (elem->arg == NULL)
-            {
-                      elog(LOG, "new-transactional argument is null");
-                      data->new_transactional = true;
-            }
-            else if (!parse_bool(strVal(elem->arg), &data->new_transactional))
-                    ereport(ERROR,
-                                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-                                 errmsg("could not parse value \"%s\" for parameter \"%s\"",
-                                 strVal(elem->arg), elem->defname)));
-        }
         else
         {
             ereport(ERROR,
@@ -263,12 +248,6 @@ pg_decode_startup(LogicalDecodingContext *ctx, OutputPluginOptions *opt, char is
                                    elem->defname,
                                    elem->arg ? strVal(elem->arg) : "(null)")));
         }
-    }
-    
-    if (!data->new_transactional && data->max_batch_size != 0)
-    {
-    	data->max_batch_size = 0;
-    	elog(WARNING, "Attempt to use max-batch-size with old transactional batching (type 9) wal2msgpack");
     }
     
     elog(DEBUG1, "completed pg_decode_startup wal2msgpack");
@@ -298,7 +277,7 @@ pg_decode_begin_txn(LogicalDecodingContext *ctx, ReorderBufferTXN *txn) {
 }
 
 static void
-write_transactional_batch(LogicalDecodingContext *ctx, TimestampTz commit_time, XLogRecPtr lsn)
+write_transactional_batch(LogicalDecodingContext *ctx, ReorderBufferTXN *txn, XLogRecPtr lsn)
 {
     msgpack_sbuffer sbuf;
     msgpack_packer pk;
@@ -312,8 +291,9 @@ write_transactional_batch(LogicalDecodingContext *ctx, TimestampTz commit_time, 
     msgpack_packer_init(&pk, &sbuf, msgpack_sbuffer_write);
 
 	msgpack_pack_int8(&pk, transactional_event);
-	commit = TIMESTAMPTZ_TO_USEC_SINCE_EPOCH(commit_time);
+	commit = TIMESTAMPTZ_TO_USEC_SINCE_EPOCH(txn->commit_time);
     msgpack_pack_int64(&pk, commit);
+    msgpack_pack_uint64(&pk, txn->end_lsn);
     msgpack_pack_uint64(&pk, lsn);
 	msgpack_pack_array(&pk, data->filtered_entries);
     msgpack_pack_ext_body(&pk, data->sbuf->data, data->sbuf->size);
@@ -332,7 +312,7 @@ pg_decode_commit_txn(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
 
     if(data->filtered_entries > 0)
     {
-    	write_transactional_batch(ctx, txn->commit_time, txn->end_lsn);
+    	write_transactional_batch(ctx, txn, txn->end_lsn);
     }
 
     if (txn->has_catalog_changes)
@@ -841,7 +821,7 @@ pg_decode_change(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
 
     	if(data->max_batch_size != 0 && data->filtered_entries >= data->max_batch_size)
     	{
-	        write_transactional_batch(ctx, txn->commit_time, change->lsn);
+	        write_transactional_batch(ctx, txn, change->lsn);
 	        data->filtered_entries = 0;
     	}
 	
@@ -902,7 +882,7 @@ pg_decode_message(struct LogicalDecodingContext *ctx,
             data->filtered_entries++;
 	    	if(data->max_batch_size != 0 && data->filtered_entries >= data->max_batch_size)
     		{
-	    	    write_transactional_batch(ctx, txn->commit_time, message_lsn);
+	    	    write_transactional_batch(ctx, txn, message_lsn);
 	        	data->filtered_entries = 0;
     		}
         }
