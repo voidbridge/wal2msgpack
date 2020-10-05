@@ -135,7 +135,7 @@ pg_decode_startup(LogicalDecodingContext *ctx, OutputPluginOptions *opt, char is
     data->include = 0;
     data->exclude = 0;
     data->include_message_prefixes = 0;
-    data->max_batch_size = 0;
+    data->max_batch_size = 100;
 
     data->sbuf = msgpack_sbuffer_new();
     msgpack_sbuffer_init(data->sbuf);
@@ -242,11 +242,8 @@ pg_decode_startup(LogicalDecodingContext *ctx, OutputPluginOptions *opt, char is
         }
         else
         {
-            ereport(ERROR,
-                    (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-                            errmsg("option \"%s\" = \"%s\" is unknown",
-                                   elem->defname,
-                                   elem->arg ? strVal(elem->arg) : "(null)")));
+        	elog(WARNING, "option [%s] = [%s] is unknown", elem->defname,
+                                   elem->arg ? strVal(elem->arg) : "(null)");
         }
     }
     
