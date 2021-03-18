@@ -312,10 +312,6 @@ pg_decode_commit_txn(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
     	write_transactional_batch(ctx, txn, txn->end_lsn);
     }
 
-    if (rbtxn_has_catalog_changes(txn))
-        elog(DEBUG1, "txn has catalog changes: yes");
-    else
-        elog(DEBUG1, "txn has catalog changes: no");
     elog(DEBUG1, "filtered entries: %lu ; # of changes: %lu ; # of changes in memory: %lu", data->filtered_entries, txn->nentries, txn->nentries_mem);
     elog(DEBUG1, "# of subxacts: %d", txn->nsubtxns);
 
