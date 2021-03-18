@@ -312,7 +312,7 @@ pg_decode_commit_txn(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
     	write_transactional_batch(ctx, txn, txn->end_lsn);
     }
 
-    if (txn->has_catalog_changes)
+    if (rbtxn_has_catalog_changes(txn))
         elog(DEBUG1, "txn has catalog changes: yes");
     else
         elog(DEBUG1, "txn has catalog changes: no");
