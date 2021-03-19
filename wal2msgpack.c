@@ -17,7 +17,9 @@
 #include "utils/numeric.h"
 
 PG_MODULE_MAGIC;
-
+/*  Updated against changes to 13.2 of test_decoding.c file commit 19890a064ebf53dedcefed0d8339ed3d449b06e6, but most updates not implemented, in particular
+ * streaming mode and prepared xacts
+ */
 /* These must be available to pg_dlsym() */
 extern void _PG_init(void);
 extern void _PG_output_plugin_init(OutputPluginCallbacks *cb);
@@ -62,7 +64,7 @@ typedef struct
 
 
 
-/* These must be available to pg_dlsym() */
+/* These must be available to dlsym() */
 static void pg_decode_startup(LogicalDecodingContext *ctx, OutputPluginOptions *opt, char is_init);
 static void pg_decode_shutdown(LogicalDecodingContext *ctx);
 static void pg_decode_begin_txn(LogicalDecodingContext *ctx,
@@ -122,14 +124,7 @@ pg_decode_startup(LogicalDecodingContext *ctx, OutputPluginOptions *opt, char is
 
     data->context = AllocSetContextCreate(TopMemoryContext,
                                           "wal2msgpack output context",
-#if PG_VERSION_NUM >= 90600
-                                          ALLOCSET_DEFAULT_SIZES
-#else
-                                          ALLOCSET_DEFAULT_MINSIZE,
-                                          ALLOCSET_DEFAULT_INITSIZE,
-                                          ALLOCSET_DEFAULT_MAXSIZE
-#endif
-    );
+                                          ALLOCSET_DEFAULT_SIZES);
 
     elog(DEBUG1, "pg_decode_startup wal2msgpack");
     data->include = 0;
