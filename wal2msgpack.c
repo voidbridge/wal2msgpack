@@ -283,7 +283,7 @@ write_transactional_batch(LogicalDecodingContext *ctx, ReorderBufferTXN *txn, XL
     msgpack_packer_init(&pk, &sbuf, msgpack_sbuffer_write);
 
 	msgpack_pack_int8(&pk, transactional_event);
-	commit = TIMESTAMPTZ_TO_USEC_SINCE_EPOCH(txn->commit_time);
+	commit = TIMESTAMPTZ_TO_USEC_SINCE_EPOCH(txn->xact_time.commit_time);
     msgpack_pack_int64(&pk, commit);
     msgpack_pack_uint64(&pk, txn->end_lsn);
     msgpack_pack_uint64(&pk, lsn);
