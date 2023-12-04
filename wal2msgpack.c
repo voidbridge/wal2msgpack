@@ -51,7 +51,7 @@ typedef struct
 
     short     include_message_prefixes;
 
-	char tables[8][255+1];
+	char tables[50][255+1];
 
     regex_t     message_prefixes[8];
 
