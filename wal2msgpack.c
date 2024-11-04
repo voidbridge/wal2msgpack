@@ -536,10 +536,9 @@ static void loop_attributes(LogicalDecodingContext *ctx, TupleDesc tupdesc, Heap
  * Accumulate tuple information and stores it at the end
  *
  * replident: is this tuple a replica identity?
- * hasreplident: does this tuple has an associated replica identity?
  */
 static void
-tuple_to_stringinfo(LogicalDecodingContext *ctx, TupleDesc tupdesc, HeapTuple tuple, TupleDesc indexdesc, bool replident, bool hasreplident)
+tuple_to_stringinfo(LogicalDecodingContext *ctx, TupleDesc tupdesc, HeapTuple tuple, TupleDesc indexdesc, bool replident)
 {
     int                 actual_attrs;
     MsgPackDecodingData	*data;
@@ -557,9 +556,9 @@ tuple_to_stringinfo(LogicalDecodingContext *ctx, TupleDesc tupdesc, HeapTuple tu
 
 /* Print columns information */
 static void
-columns_to_stringinfo(LogicalDecodingContext *ctx, TupleDesc tupdesc, HeapTuple tuple, bool hasreplident)
+columns_to_stringinfo(LogicalDecodingContext *ctx, TupleDesc tupdesc, HeapTuple tuple)
 {
-    tuple_to_stringinfo(ctx, tupdesc, tuple, NULL, false, hasreplident);
+    tuple_to_stringinfo(ctx, tupdesc, tuple, NULL, false);
 }
 
 /* Print replica identity information */
@@ -567,7 +566,7 @@ static void
 identity_to_stringinfo(LogicalDecodingContext *ctx, TupleDesc tupdesc, HeapTuple tuple, TupleDesc indexdesc)
 {
     /* Last parameter does not matter */
-    tuple_to_stringinfo(ctx, tupdesc, tuple, indexdesc, true, false);
+    tuple_to_stringinfo(ctx, tupdesc, tuple, indexdesc, true);
 }
 
 static bool filter_table(const MsgPackDecodingData *data, const char *schemaandtable, int errorCode) {
@@ -745,11 +744,11 @@ pg_decode_change(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
         {
             case REORDER_BUFFER_CHANGE_INSERT:
                 /* Print the new tuple */
-                columns_to_stringinfo(ctx, tupdesc, &change->data.tp.newtuple->tuple, false);
+                columns_to_stringinfo(ctx, tupdesc, change->data.tp.newtuple);
                 break;
             case REORDER_BUFFER_CHANGE_UPDATE:
                 /* Print the new tuple */
-                columns_to_stringinfo(ctx, tupdesc, &change->data.tp.newtuple->tuple, true);
+                columns_to_stringinfo(ctx, tupdesc, change->data.tp.newtuple);
 
                 /*
                  * The old tuple is available when:
@@ -768,18 +767,18 @@ pg_decode_change(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
                     if (indexrel != NULL)
                     {
                         indexdesc = RelationGetDescr(indexrel);
-                        identity_to_stringinfo(ctx, tupdesc, &change->data.tp.newtuple->tuple, indexdesc);
+                        identity_to_stringinfo(ctx, tupdesc, &change->data.tp.newtuple, indexdesc);
                         RelationClose(indexrel);
                     }
                     else
                     {
-                        identity_to_stringinfo(ctx, tupdesc, &change->data.tp.newtuple->tuple, NULL);
+                        identity_to_stringinfo(ctx, tupdesc, &change->data.tp.newtuple, NULL);
                     }
                 }
                 else
                 {
                     elog(DEBUG1, "old tuple is not null");
-                    identity_to_stringinfo(ctx, tupdesc, &change->data.tp.oldtuple->tuple, NULL);
+                    identity_to_stringinfo(ctx, tupdesc, &change->data.tp.oldtuple, NULL);
                 }
                 break;
             case REORDER_BUFFER_CHANGE_DELETE:
@@ -788,12 +787,12 @@ pg_decode_change(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
                 if (indexrel != NULL)
                 {
                     indexdesc = RelationGetDescr(indexrel);
-                    identity_to_stringinfo(ctx, tupdesc, &change->data.tp.oldtuple->tuple, indexdesc);
+                    identity_to_stringinfo(ctx, tupdesc, &change->data.tp.oldtuple, indexdesc);
                     RelationClose(indexrel);
                 }
                 else
                 {
-                    identity_to_stringinfo(ctx, tupdesc, &change->data.tp.oldtuple->tuple, NULL);
+                    identity_to_stringinfo(ctx, tupdesc, &change->data.tp.oldtuple, NULL);
                 }
 
                 if (change->data.tp.oldtuple == NULL)
