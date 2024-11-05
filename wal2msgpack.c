@@ -767,18 +767,18 @@ pg_decode_change(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
                     if (indexrel != NULL)
                     {
                         indexdesc = RelationGetDescr(indexrel);
-                        identity_to_stringinfo(ctx, tupdesc, &change->data.tp.newtuple, indexdesc);
+                        identity_to_stringinfo(ctx, tupdesc, change->data.tp.newtuple, indexdesc);
                         RelationClose(indexrel);
                     }
                     else
                     {
-                        identity_to_stringinfo(ctx, tupdesc, &change->data.tp.newtuple, NULL);
+                        identity_to_stringinfo(ctx, tupdesc, change->data.tp.newtuple, NULL);
                     }
                 }
                 else
                 {
                     elog(DEBUG1, "old tuple is not null");
-                    identity_to_stringinfo(ctx, tupdesc, &change->data.tp.oldtuple, NULL);
+                    identity_to_stringinfo(ctx, tupdesc, change->data.tp.oldtuple, NULL);
                 }
                 break;
             case REORDER_BUFFER_CHANGE_DELETE:
@@ -787,12 +787,12 @@ pg_decode_change(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
                 if (indexrel != NULL)
                 {
                     indexdesc = RelationGetDescr(indexrel);
-                    identity_to_stringinfo(ctx, tupdesc, &change->data.tp.oldtuple, indexdesc);
+                    identity_to_stringinfo(ctx, tupdesc, change->data.tp.oldtuple, indexdesc);
                     RelationClose(indexrel);
                 }
                 else
                 {
-                    identity_to_stringinfo(ctx, tupdesc, &change->data.tp.oldtuple, NULL);
+                    identity_to_stringinfo(ctx, tupdesc, change->data.tp.oldtuple, NULL);
                 }
 
                 if (change->data.tp.oldtuple == NULL)
