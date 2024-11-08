@@ -646,6 +646,8 @@ pg_decode_change(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
         size_t relNamespaceLength;
         size_t relNameLength;
 
+        elog(DEBUG1, "Table \"%s\" valid", NameStr(class_form->relname));
+
         tupdesc = RelationGetDescr(relation);
 
         /* Avoid leaking memory by using and resetting our own context */
@@ -815,6 +817,10 @@ pg_decode_change(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
         MemoryContextSwitchTo(old);
         MemoryContextReset(data->context);
 
+    }
+    else
+    {
+        elog(DEBUG1, "Table \"%s\" not valid", NameStr(class_form->relname));
     }
 }
 
