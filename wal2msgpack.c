@@ -818,10 +818,6 @@ pg_decode_change(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
         MemoryContextReset(data->context);
 
     }
-    else
-    {
-        elog(DEBUG1, "Table \"%s\" not valid", NameStr(class_form->relname));
-    }
 }
 
 static void
